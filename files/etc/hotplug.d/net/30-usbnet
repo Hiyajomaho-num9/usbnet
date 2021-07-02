@@ -1,0 +1,15 @@
+#!/bin/sh
+. $IPKG_INSTROOT/lib/functions.sh
+(echo "$INTERFACE" | grep -q usb[0-9]) || exit 0
+PROG='/usr/bin/usbnet'
+get_config() {
+config_get enabled "$1" 'enabled' '0'
+config_get MWAN3 "$1" 'mwan3' '0'
+config_get IPV4 "$1" 'ipv4' '0'
+config_get IPV6 "$1" 'ipv6' '0'
+}
+config_load 'usbnet'
+config_foreach get_config 'usbnet'
+[ "$ACTION" = "remove" ] && $PROG -d $INTERFACE 0 0 0
+[ "$enabled" = "1" ] || exit 0
+[ "$ACTION" = "add" ] && $PROG -a $INTERFACE $MWAN3 $IPV4 $IPV6

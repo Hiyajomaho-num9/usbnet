@@ -1,0 +1,171 @@
+#!/bin/sh
+# 模块化USB共享网络自动配置脚本(仿二进制运行方式)
+# 恩山无线论坛：https://www.right.com.cn/forum/?382335 半原创
+
+	. $IPKG_INSTROOT/lib/functions.sh
+	mwan3=$(opkg list-installed | grep 'mwan3 - [0-9]')
+
+usage() {
+	cat <<EOF
+Usage: $0 [options] <command> [arguments]
+Commands:
+
+	-a	添加	添加 网卡 mwan3[0-1] ipv4[0-1] ipv6[0-1]
+	-d	移除	移除 网卡 mwan3[0-1] ipv4[0-1] ipv6[0-1]
+	-h	帮助	显示帮助信息并退出
+	-v	版本	显示版本信息并退出
+
+Options:
+
+EOF
+	exit ${1:-1}
+}
+
+echolog() {
+	echo -e "$(date "+%Y-%m-%d %H:%M:%S"): $1" >> /tmp/log/usbnet.log
+}
+
+get_config() {
+	config_get enabled "$1" 'enabled' '0'
+}
+	config_load 'usbnet'
+	config_foreach get_config 'usbnet'
+
+get() {
+	if [ "$1" -eq "1" ]; then
+	[ "$4" -eq "1" ] 2>/dev/null && ipv4='ipv4'
+	[ "$5" -eq "1" ] 2>/dev/null && ipv6='ipv6'
+	elif [ "$1" -eq "0" ]; then
+	[ "$4" -eq "0" ] 2>/dev/null && ipv4='ipv4'
+	[ "$5" -eq "0" ] 2>/dev/null && ipv6='ipv6'
+	fi
+	Protocol="$ipv4 $ipv6"
+}
+
+add() {
+	get 1 $@ >/dev/null 2>&1
+	for Protocol in $Protocol ; do
+	#创建接口
+	[ "${Protocol}" = "ipv4" ] && dhcp=dhcp || dhcp=dhcpv6
+	if [ "$(uci -q get network.${1}_${Protocol})" != "interface" ]; then
+	uci set network.${1}_${Protocol}=interface
+	uci set network.${1}_${Protocol}.ifname=${1}
+	uci set network.${1}_${Protocol}.proto=${dhcp}
+	uci commit network
+	echolog "新建一个接口${1}_${Protocol}"
+	fi
+	#指定区域
+	if [ $(uci -q get firewall.@zone[1].network|grep -wc "${1}_${Protocol}") != "1" ]; then
+	uci add_list firewall.@zone[1].network="${1}_${Protocol}"
+	uci commit firewall
+	echolog "指定接口${1}_${Protocol}到防火墙\"wan\"区域"
+	fi
+	#添加负载
+	if [ ! -n "$mwan3" ] || [ "$2" -eq "1" ] 2>/dev/null; then
+	chk_ipv4_list="223.5.5.5 223.6.6.6 8.8.8.8 8.8.4.4 114.114.114.114"
+	chk_ipv6_list="2400:3200::1 2400:3200:baba::1 240c::6644 240c::6666"
+	if [ "$(uci -q get mwan3.${1}_${Protocol})" != "interface" ]; then
+	#--------添加-mwan3-接口
+	uci set mwan3.${1}_${Protocol}=interface
+	uci set mwan3.${1}_${Protocol}.enabled=1
+	uci set mwan3.${1}_${Protocol}.count=2
+	uci set mwan3.${1}_${Protocol}.timeout=2
+	uci set mwan3.${1}_${Protocol}.interval=5
+	uci set mwan3.${1}_${Protocol}.down=4
+	uci set mwan3.${1}_${Protocol}.up=1
+	[ "${Protocol}" = "ipv4" ] || chk_ipv4_list=$chk_ipv6_list
+	for i in ${chk_ipv4_list}
+	do
+		uci add_list mwan3.${1}_${Protocol}.track_ip=${i}
+	done
+	uci set mwan3.${1}_${Protocol}.reliability=1
+	uci set mwan3.${1}_${Protocol}.initial_state=online
+	uci set mwan3.${1}_${Protocol}.family=${Protocol}
+	uci set mwan3.${1}_${Protocol}.track_method=ping
+	uci set mwan3.${1}_${Protocol}.size=56
+	uci set mwan3.${1}_${Protocol}.failure_interval=5
+	uci set mwan3.${1}_${Protocol}.recovery_interval=5
+	uci set mwan3.${1}_${Protocol}.flush_conntrack=never
+	echolog "添加${1}_${Protocol}至负载均衡接口"
+	#--------添加-mwan3-成员
+	uci set mwan3.${1}_${Protocol}_m1_${Protocol}=member
+	uci set mwan3.${1}_${Protocol}_m1_${Protocol}.interface=${1}_${Protocol}
+	uci set mwan3.${1}_${Protocol}_m1_${Protocol}.metric=1
+	uci set mwan3.${1}_${Protocol}_m1_${Protocol}.weight=1
+	echolog "添加${1}_${Protocol}至负载均衡成员"
+	#--------添加-mwan3-策略
+	uci add_list mwan3.balanced.use_member=${1}_${Protocol}_m1_${Protocol}
+	uci commit mwan3
+	echolog "添加${1}_${Protocol}至负载均衡策略"
+	fi
+	fi
+	ifup ${1} >/dev/null 2>&1
+	fw3 reload >/dev/null 2>&1
+	done
+}
+
+del() {
+	get 0 $@ >/dev/null 2>&1
+	usb=$(ls /sys/class/net|grep -w ${1} 2>/dev/null)
+	if [ "$enabled" -eq "0" ] || [ -n "${usb}" ]; then
+	[ -n "${usb}" ] || echolog "检测到设备已移除"
+	[ "$2" -eq "0" ] 2>/dev/null && echolog "检测到已禁用\"自动负载\""
+	[ "$enabled" -eq "0" ] && [ -n "${usb}" ] && echolog "检测到已禁用但设备并未移除一点点善后工作"
+	fi
+	for Protocol in $Protocol ; do
+	#移除接口
+	if [ "$(uci -q get network.${1}_${Protocol})" = "interface" ]; then
+	uci -q delete network.${1}_${Protocol}
+	uci commit network
+	echolog "移除接口${1}_${Protocol}"
+	fi
+	#移除指定
+	if (uci -q get firewall.@zone[1].network|grep -wcq "${1}_${Protocol}");then
+	uci -q del_list firewall.@zone[1].network="${1}_${Protocol}"
+	uci commit firewall
+	echolog "移除接口${1}_${Protocol}到防火墙\"wan\"区域的指定"
+	fi
+	#移除负载
+	if [ "$(uci -q get mwan3.${1}_${Protocol})" = "interface" ]; then
+	#--------移除-mwan3-接口
+	uci -q del mwan3."${1}_${Protocol}"
+	echolog "已移除${1}_${Protocol}至负载均衡接口"
+	#--------移除-mwan3-成员
+	uci -q del mwan3."${1}_${Protocol}"_m1_${Protocol}
+	echolog "已移除${1}_${Protocol}至负载均衡成员"
+	#--------移除-mwan3-策略
+	uci -q del_list mwan3.balanced.use_member=${1}_${Protocol}_m1_${Protocol}
+	uci commit mwan3
+	echolog "已移除${1}_${Protocol}负载均衡策略"
+	fi
+	done
+	get 1 $@ >/dev/null 2>&1
+	for Protocol in $Protocol ; do
+	#移除负载
+	if [ ! -n "$mwan3" ] || [ "$2" -eq "0" ] 2>/dev/null || [ "$enabled" -eq "0" ]; then
+	if [ "$(uci -q get mwan3.${1}_${Protocol})" = "interface" ]; then
+	#--------移除-mwan3-接口
+	uci -q del mwan3."${1}_${Protocol}"
+	echolog "已移除${1}_${Protocol}至负载均衡接口"
+	#--------移除-mwan3-成员
+	uci -q del mwan3."${1}_${Protocol}"_m1_${Protocol}
+	echolog "已移除${1}_${Protocol}至负载均衡成员"
+	#--------移除-mwan3-策略
+	uci -q del_list mwan3.balanced.use_member=${1}_${Protocol}_m1_${Protocol}
+	uci commit mwan3
+	echolog "已移除${1}_${Protocol}负载均衡策略"
+	fi
+	fi
+	done
+	ifup ${1} >/dev/null 2>&1
+	fw3 reload >/dev/null 2>&1
+}
+
+COMMAND="$1"; shift
+case "$COMMAND" in
+	-h) usage 0;;
+	-a) add $@;;
+	-d) del $@;;
+	-v) echo '2.0.1';;
+	*) usage 0;;
+esac

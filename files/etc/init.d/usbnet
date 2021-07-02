@@ -1,0 +1,37 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+
+PROG='/usr/bin/usbnet'
+USB=$(ls /sys/class/net | grep 'usb[0-9]')
+
+service_triggers()
+{
+	procd_add_reload_trigger "usbnet"
+}
+
+get_config() {
+	config_get enabled "$1" 'enabled' '0'
+	config_get MWAN3 "$1" 'mwan3' '0'
+	config_get IPV4 "$1" 'ipv4' '0'
+	config_get IPV6 "$1" 'ipv6' '0'
+}
+
+start() {
+	config_load 'usbnet'
+	config_foreach get_config 'usbnet'
+	[ "$enabled" -gt 0 ] || return 1
+	for USB in $USB ; do
+	$PROG -d $USB $MWAN3 $IPV4 $IPV6
+	$PROG -a $USB $MWAN3 $IPV4 $IPV6
+	done
+}
+
+stop() {
+	config_load 'usbnet'
+	config_foreach get_config 'usbnet'
+	[ "$enabled" -gt 0 ] && return 1
+	for USB in $USB ; do
+	$PROG -d $USB 0 0 0
+	done
+}

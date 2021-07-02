@@ -1,0 +1,6 @@
+
+config usbnet
+	option enabled '0'
+	option mwan3 '1'
+	option ipv4 '1'
+
